@@ -10,7 +10,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import pairwise_distances, r2_score, mean_absolute_percentage_error
 from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering as AC
-from sklearn.neighbors import kneighbors_graph
+from sklearn.neighbors import kneighbors_graph, NearestNeighbors
 from copy import copy
 from sklearn.svm import SVC
 from sklearn.semi_supervised import LabelSpreading
@@ -20,7 +20,19 @@ from paretoset import paretoset
 warnings.filterwarnings("ignore")
 
 from sklearn.gaussian_process import GaussianProcessRegressor
-from treeple import PatchObliqueRandomForestRegressor, PatchObliqueRandomForestClassifier
+from treeple import ObliqueRandomForestRegressor, ObliqueRandomForestClassifier, RandomForestRegressor, RandomForestClassifier, PatchObliqueRandomForestRegressor,  PatchObliqueRandomForestClassifier
+
+
+from scipy.stats import gaussian_kde
+from scipy.signal import find_peaks
+
+
+def get_N_modes(data):
+    kde = gaussian_kde(data, bw_method=gaussian_kde(data).scotts_factor()*0.6)
+    lims = [np.min(data), np.max(data)]
+    kde_vals = kde(np.linspace(*lims,200))
+    peaks = find_peaks(kde_vals)[0]
+    return len(peaks)
 
 def get_min_dist(xt,grid):
     ds = pairwise_distances(np.vstack([xt.reshape(1,-1),grid]))
@@ -75,8 +87,8 @@ def fps(points, n_samples):
     return points[sample_inds]
 
 class BO_RFR:
-    def __init__(self, X, y, grid, f, x_test, acq = 'BO', est_labels = 'known', class_method = 'RFC', gpr = False, gl = None,
-                 save_history = True, N_batch = 1, cl_weight = 0.3):
+    def __init__(self, X, y, grid, f, x_test, acq = 'BO', est_labels = 'known', class_method = 'ORFC', reg_method = 'ORFC', gpr = False, gl = None,
+                 save_history = True, N_batch = 1, cl_weight = 0.3, k_init = 2, k_adaptive = True):
         self.X = X
         self.y = y
         self.N_batch = N_batch
@@ -95,6 +107,7 @@ class BO_RFR:
         self.acq = acq
         self.est_labels = est_labels
         self.class_method = class_method
+        self.reg_method = reg_method
         self.gpr = gpr
         self.scores = []
         self.x_test = x_test
@@ -103,14 +116,20 @@ class BO_RFR:
         self.ref = np.array([self.f(xi) for xi in tqdm(self.x_test)]).ravel()
         self.n_iters = 0
         self.cl_weight = cl_weight
+        self.k_init = k_init
+        self.k_adaptive = k_adaptive
     
     def get_labels(self):
+
+        if self.k_adaptive and self.est_labels in ['GM','AC']:
+            self.k_init = get_N_modes(self.y.ravel())
+        
         if self.est_labels == 'GM':
-            gm = BayesianGaussianMixture(n_components=2, n_init=100, init_params='random').fit(self.y.reshape(-1,1))
+            gm = BayesianGaussianMixture(n_components=self.k_init, n_init=100, init_params='random').fit(self.y.reshape(-1,1))
             labels = gm.predict(self.y.reshape(-1,1)).ravel()
         elif self.est_labels == 'AC':
             knn = kneighbors_graph(self.X, n_neighbors=int(np.floor(self.X.shape[0]/2.)), ).toarray()
-            acl = AC(n_clusters=2, connectivity=knn, linkage='single').fit(self.y.reshape(-1, 1))
+            acl = AC(n_clusters=self.k_init, connectivity=knn, linkage='single').fit(self.y.reshape(-1, 1))
             labels = acl.labels_
         elif self.est_labels == 'known':
             labels = np.array([self.gl(xi) for xi in self.X])
@@ -124,8 +143,15 @@ class BO_RFR:
         if self.gpr:
             self.model = GaussianProcessRegressor().fit(self.X, self.y)
         else:
-            #self.model = RandomForestRegressor(n_jobs = -1,).fit(self.X, self.y)
-            self.model = PatchObliqueRandomForestRegressor(n_jobs = -1,).fit(self.X, self.y)
+            if self.reg_method == 'RFC':
+                self.model = RandomForestRegressor(n_jobs = -1,).fit(self.X, self.y)
+            elif self.reg_method == 'ORFC':
+                self.model = ObliqueRandomForestRegressor(n_jobs = -1,).fit(self.X, self.y)
+            elif self.reg_method == 'PORFC':
+                self.model = PatchObliqueRandomForestRegressor(n_jobs = -1,).fit(self.X, self.y)
+            else:
+                print('No valid regressio method selected! valid options are: RFC, ORFC, PORFC')
+    
     def get_uncertainty(self, x):
         if self.gpr:
             _, stds = self.model.predict(x, return_std=True)
@@ -142,12 +168,8 @@ class BO_RFR:
 
     def get_ds(self, x):
         
-        temp = np.vstack([x,self.X])
-        dmat = pairwise_distances(temp) 
-        dmat += np.eye(dmat.shape[0])*1e3
-        dmat = dmat[:x.shape[0],x.shape[0]:]
-        ds = np.min(dmat, axis=1)
-        
+        nn = NearestNeighbors(n_neighbors=1).fit(self.X)
+        ds = nn.kneighbors(x)[0].ravel()
         ds = MinMaxScaler().fit_transform(np.array(ds).reshape(-1,1)).ravel()
         return ds
     
@@ -168,6 +190,10 @@ class BO_RFR:
     
     def fit_classifier(self):
         if self.class_method == 'RFC':
+            self.classifier = RandomForestClassifier(n_jobs = -1, n_estimators=100).fit(self.X, self.labels)
+        elif self.class_method == 'ORFC':
+            self.classifier = ObliqueRandomForestClassifier(n_jobs = -1, n_estimators=100).fit(self.X, self.labels)
+        elif self.class_method == 'PORFC':
             self.classifier = PatchObliqueRandomForestClassifier(n_jobs = -1, n_estimators=100).fit(self.X, self.labels)
         elif self.class_method == 'SVC':
             self.classifier = SVC(kernel='rbf',gamma=1, probability=True, C=1000).fit(self.X, self.labels)
