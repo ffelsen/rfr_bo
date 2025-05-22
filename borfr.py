@@ -7,7 +7,7 @@ from scipy import stats
 from sklearn.mixture import BayesianGaussianMixture, GaussianMixture
 from scipy import stats
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import pairwise_distances, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import pairwise_distances, r2_score, mean_absolute_percentage_error, max_error
 from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering as AC
 from sklearn.neighbors import kneighbors_graph, NearestNeighbors
@@ -110,6 +110,7 @@ class BO_RFR:
         self.reg_method = reg_method
         self.gpr = gpr
         self.scores = []
+        self.all_scores = []
         self.x_test = x_test
         self.gl = gl
         print('generating test data')
@@ -118,6 +119,7 @@ class BO_RFR:
         self.cl_weight = cl_weight
         self.k_init = k_init
         self.k_adaptive = k_adaptive
+        self.use_dist = True
     
     def get_labels(self):
 
@@ -178,7 +180,10 @@ class BO_RFR:
             stds = self.get_uncertainty(self.grid)
             return stds # max uncertainty
         else:
-            ds = self.get_ds(self.grid)**2
+            if self.use_dist:
+                ds = self.get_ds(self.grid)**2
+            else:
+                ds = np.ones(self.grid.shape[0])
             stds_cl = self.get_uncertainty_class(self.grid)
             stds = self.get_uncertainty(self.grid)
     
@@ -245,6 +250,7 @@ class BO_RFR:
         self.get_labels()
         self.fit_classifier()
         self.scores.append(self.get_r2())        
+        self.all_scores.append([self.get_r2(),self.get_rmse(),self.get_mape(),self.get_maxe()])
         for i in tqdm(range(n_iter)):
             next_point = self.get_next_point()
 
@@ -267,6 +273,7 @@ class BO_RFR:
                 self.Xs.append(self.X)
                 self.ys.append(self.y)
             self.scores.append(self.get_r2())
+            self.all_scores.append([self.get_r2(),self.get_rmse(),self.get_mape(),self.get_maxe()])
 
     def get_rmse(self):
         pred = self.model.predict(self.x_test).ravel()
@@ -282,3 +289,7 @@ class BO_RFR:
     def get_mape(self):
         pred = self.model.predict(self.x_test).ravel()
         return mean_absolute_percentage_error(pred, self.ref)
+        
+    def get_maxe(self):
+        pred = self.model.predict(self.x_test).ravel()
+        return max_error(pred, self.ref)
